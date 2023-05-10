@@ -3,6 +3,8 @@
 import pickle
 import math
 import numpy
+import heapq
+from collections import defaultdict
 
 import cv2
 import numpy as np
@@ -134,6 +136,7 @@ class TinySlam:
         """
         # TODO for TP4
         score = 0
+        
         # Estimer les positions des detections du laser dans le repere global
         distance_obst = lidar.get_sensor_values()
         direction_obst = lidar.get_ray_angles()
@@ -148,6 +151,7 @@ class TinySlam:
         x_map, y_map = self._conv_world_to_map(x, y)
         
         # Supprimer les points hors de la carte
+        ## Supprimer les points negatifs
         x_inside_map = x_map >= 0
         y_inside_map = y_map >= 0
         ## Produit booleen (AND)
@@ -155,8 +159,10 @@ class TinySlam:
         x_map = x_map[points_inside_map]
         y_map = y_map[points_inside_map]
         
+        ## Supprimer les points situés au-delà du bord de la carte
         x_inside_map = x_map < self.x_max_map
         y_inside_map = y_map < self.y_max_map
+        ## Produit booleen (AND)
         points_inside_map = x_inside_map * y_inside_map
         x_map = x_map[points_inside_map]
         y_map = y_map[points_inside_map]
@@ -165,6 +171,7 @@ class TinySlam:
         score = numpy.sum(self.occupancy_map[x_map, y_map])
 
         return score
+
 
     def get_corrected_pose(self, odom, odom_pose_ref=None):
         """
@@ -175,11 +182,16 @@ class TinySlam:
                         use self.odom_pose_ref if not given
         """
         # TODO for TP4
+        ## Si le parametre "odom_pose_ref" n'est pas transmis,
+        # la fonction utilise la valeur mémorisée "odom_pose_ref"
         if (odom_pose_ref is None):
             odom_pose_ref = self.odom_pose_ref
         
+        # Obtenir la position du robot dans le repère absolu
+        # (x, y, theta): position du robot dans le repère absolu
+        # odom: position du robot dans le repère odométrie
+        # odom_pose_ref: position du repère odométrie dans le repère absolu
         d0 = math.sqrt((odom[0] - odom_pose_ref[0])**2 + (odom[1] - odom_pose_ref[1])**2)
-        # sum_angle = theta0_ref + alpha0
         sum_angle = math.atan2((odom[1]-odom_pose_ref[1]), (odom[0]-odom_pose_ref[0]))
         x = odom_pose_ref[0] + d0 * math.cos(sum_angle)
         y = odom_pose_ref[1] + d0 * math.sin(sum_angle)
@@ -188,6 +200,7 @@ class TinySlam:
         corrected_pose = odom_pose
 
         return corrected_pose
+
 
     def localise(self, lidar, odom):
         """
@@ -206,11 +219,12 @@ class TinySlam:
         N = 100
         n_repetition = 0
         while n_repetition < N:
-            # Tirer un offset et ajoutez-le à la position de reference de l'odometrie
+            # Tirer un offset aléatoire selon une gaussienne de moyenne nulle
+            # et ajoutez-le à la position de reference de l'odometrie
             offset = []
-            offset.append(numpy.random.normal(0.0, 4.0))
-            offset.append(numpy.random.normal(0.0, 4.0))
-            offset.append(numpy.random.normal(0.0, 0.5))
+            offset.append(numpy.random.normal(0.0, 7))
+            offset.append(numpy.random.normal(0.0, 7))
+            offset.append(numpy.random.normal(0.0, 0.1))
             new_odom_ref = best_odom + offset
             
             # Calculer le score avec cette nouvelle position de ref
@@ -228,33 +242,33 @@ class TinySlam:
         # Mettre à jour la position de ref
         self.odom_pose_ref = best_odom
         
-
         return best_score
 
-    def update_map(self, lidar, pose):
+
+    def update_map(self, lidar, pose, path=[]):
         """
         Bayesian map update with new observation
         lidar : placebot object with lidar data
         pose : [x, y, theta] nparray, corrected pose in world coordinates
         """
         # TODO for TP3
-        # FALTA CALCULAR AS PROBABILIDADES (PERGUNTAR PARA O PROF)
-        
+                
         # Conversion des coordonnees polaires en cartesiennes
         r = lidar.get_sensor_values()
         angle = lidar.get_ray_angles()
         x = r * numpy.cos(angle + pose[2]) + pose[0]
         y = r * numpy.sin(angle + pose[2]) + pose[1]
 
-        # Detection des obstacles
+        # Si la distance d'un point est égale à "max_range", il n'y a pas d'obstacle.
+        # Par conséquent, on se limite uniquement aux points dont la distance est inférieure à "max_range".
         x_obs = x[r < lidar.max_range - 20]
         y_obs = y[r < lidar.max_range - 20]
         
+        # Tracer une ligne de points à partir du robot.
+        # Les points sur la ligne qui ne sont pas des obstacles ont valeur de probabilité faible.
+        # Les points sur la ligne qui sont détectées comme obstacle ont valeur de probabilité forte.
         self.add_map_points(x_obs, y_obs, 0.5)
         for i in range (numpy.size(x)):
-
-            # if r[i] < lidar.max_range - 20:
-                # self.add_map_points(x[i], y[i], 0.5)
             self.add_map_line(pose[0], pose[1], x[i], y[i], -0.1)
         
         # Seuillage des probabilites
@@ -262,7 +276,47 @@ class TinySlam:
         self.occupancy_map[self.occupancy_map < MIN_PROB] = MIN_PROB
         
         #self.display(pose)
-        self.display2(pose)
+        self.display2(pose, path)
+
+
+    def get_neighbors(self, current, expanded_map):
+        """
+        Return the 8 neighbors on the map of the current position
+        """
+        neighbors = []
+        
+        for x in range(-1, 2, 1):
+            x_neighbors = current[0] + x
+            # Checks if x_neighbors is in map
+            if (x_neighbors >= 0) and (x_neighbors < self.x_max_map):
+                for y in range(-1, 2, 1):
+                    y_neighbors = current[1] + y
+                    # Checks if y_neighbors is in map
+                    if (y_neighbors >= 0) and (y_neighbors < self.y_max_map):
+                        # Checks if the point is not the robot itself
+                        if not((x_neighbors == current[0]) and (y_neighbors == current[1])):
+                            # Checks that the point is not an obstacle
+                            if expanded_map[x_neighbors][y_neighbors] == MIN_PROB:
+                                neighbors.append((x_neighbors, y_neighbors))
+        return neighbors
+
+
+    def heuristic(self, a, b):
+        """
+        Calculate the Euclidean distance
+        """
+        return math.sqrt((b[0] - a[0])**2 + (b[1] - a[1])**2)
+                
+
+    def reconstruct_path(self, cameFrom, current):
+        """
+        Reconstruct the path
+        """        
+        total_path = [current]
+        while current in cameFrom.keys():
+            current = cameFrom[current]
+            total_path.insert(0, current)
+        return total_path
 
     def plan(self, start, goal):
         """
@@ -271,9 +325,67 @@ class TinySlam:
         goal : [x, y, theta] nparray, goal pose in world coordinates
         """
         # TODO for TP5
-
-        path = [start, goal]  # list of poses
-        return path
+        
+        # Expand obstacles in map
+        occupancy_map_expanded = self.occupancy_map.copy()
+        
+        # Obstacle growth thickness
+        expanded_side = 15
+        
+        # Browse all points on the map
+        for x_map in range(self.x_max_map):
+            for y_map in range(self.y_max_map):
+                # If the point is neither a free space (blue) nor an uncharted space (green)
+                if (self.occupancy_map[x_map][y_map] != MIN_PROB) and (self.occupancy_map[x_map][y_map] != 0):
+                    #Enlarge the border (generate a square of side 2*expanded_side with the point centered on this square)
+                    for x_expanded in range(expanded_side):
+                        for y_expanded in range(expanded_side):
+                            if ((x_map + x_expanded) < self.x_max_map) and ((y_map + y_expanded) < self.y_max_map):
+                                if ((x_map - x_expanded) > 0) and ((y_map - y_expanded) > 0):
+                                    occupancy_map_expanded[x_map-x_expanded][y_map+y_expanded] = MAX_PROB
+                                    occupancy_map_expanded[x_map+x_expanded][y_map+y_expanded] = MAX_PROB
+                                    occupancy_map_expanded[x_map-x_expanded][y_map-y_expanded] = MAX_PROB
+                                    occupancy_map_expanded[x_map+x_expanded][y_map-y_expanded] = MAX_PROB
+                    
+        
+        # Convert start and goal in map coordinates
+        x_start, y_start = self._conv_world_to_map(start[0], start[1])
+        start = (x_start, y_start)
+        
+        x_goal, y_goal = self._conv_world_to_map(goal[0], goal[1])
+        goal = (x_goal, y_goal)
+        
+        # Initialize the variables
+        # heap == openSet (pseudocode)
+        heap = []
+        heapq.heappush(heap, (0, start))
+        
+        came_from = {}
+        
+        gScore = defaultdict(lambda: math.inf)
+        gScore[start] = 0
+        
+        fScore = defaultdict(lambda: math.inf)
+        fScore[start] = self.heuristic(start, goal)
+        
+        # Visit each node in order
+        while len(heap) != 0:
+            _, current = heapq.heappop(heap)
+            if current == goal:
+                return self.reconstruct_path(came_from, current)
+            
+            neighbors = self.get_neighbors(current, occupancy_map_expanded)
+            for neighbor in neighbors:
+                tentative_gScore = gScore[current] + self.heuristic(current, neighbor)
+                if tentative_gScore < gScore[neighbor]:
+                    came_from[neighbor] = current
+                    gScore[neighbor] = tentative_gScore
+                    fScore[neighbor] = tentative_gScore + self.heuristic(neighbor, goal)
+                    if neighbor not in heap:
+                        #heapq.heappush(heap, (tentative_gScore, neighbor))
+                        heapq.heappush(heap, (fScore[neighbor], neighbor))
+        # Return failure
+        return []
 
     def display(self, robot_pose):
         """
@@ -295,7 +407,7 @@ class TinySlam:
         # plt.show()
         plt.pause(0.001)
 
-    def display2(self, robot_pose):
+    def display2(self, robot_pose, path=[]):
         """
         Screen display of map and robot pose,
         using opencv (faster than the matplotlib version)
@@ -314,11 +426,16 @@ class TinySlam:
 
         pt1_x, pt1_y = self._conv_world_to_map(robot_pose[0], -robot_pose[1])
 
-        # print("robot_pose", robot_pose)
         pt1 = (int(pt1_x), int(pt1_y))
         pt2 = (int(pt2_x), int(pt2_y))
         cv2.arrowedLine(img=img2, pt1=pt1, pt2=pt2,
                         color=(0, 0, 255), thickness=2)
+        
+        traj_world = [(self._conv_map_to_world(x, y)) for x, y in path]
+        trajectory = [self._conv_world_to_map(x, -y) for x, y in traj_world]
+        for i in range(len(trajectory) - 1):
+            cv2.line(img2, tuple(trajectory[i]), tuple(trajectory[i + 1]), (255, 128, 0), 2)
+
         cv2.imshow("map slam", img2)
         cv2.waitKey(1)
 
