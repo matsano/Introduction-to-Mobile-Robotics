@@ -15,5 +15,5 @@ At the end of the course, you will have to submit your solution to your teacher 
 
 # Contact
 
-If you have questions about the code, in particular the use of *Place-Bot* you can contact: emmanuel . battesti at ensta-paris . fr
+If you have questions about the code, in particular the use of *Place-Bot* you can contact: emmanuel.battesti at ensta-paris.fr
 
